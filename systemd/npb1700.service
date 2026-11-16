@@ -1,0 +1,21 @@
+[Unit]
+Description=THR charging station server (NPB-1700-48, web :8000)
+Wants=can0.service network-online.target
+After=can0.service network-online.target
+
+[Service]
+Type=simple
+User=robot
+# /dev/gpiochip* 屬於 dialout 群組
+SupplementaryGroups=dialout
+RuntimeDirectory=npb1700
+WorkingDirectory=/run/npb1700
+Environment=PYTHONUNBUFFERED=1
+# lgpio 的通知管線放這裡，不要污染專案資料夾
+Environment=LG_WD=/run/npb1700
+ExecStart=/usr/bin/python3 /home/robot/THR_charging_station/npb1700_server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
