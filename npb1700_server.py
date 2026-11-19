@@ -17,8 +17,10 @@ v7 變更 (相對 v6，舊版在 backup/npb1700_server_v6.py)：
 - BAT_OK/CHG_OK 輸入加下拉電阻 + 連續 2 次才判定，避免浮接誤判
 - 溫度改為有號數解析 (零下不會被當成幾千度)
 - CAN 送出間隔至少 25 ms (手冊最小 20 ms)，監控與 API 共用不打架
-- 自保型電磁鐵控制 (BTS7960)：POST /magnet/release?ms=2000、POST /magnet/off
-  通電上限 3 秒、冷卻 10 秒、監控執行緒備援強制斷電
+- 自保型電磁鐵控制 (BTS7960)：POST /magnet/release?ms=5000、POST /magnet/off
+  通電上限 5 秒、冷卻 5 秒、監控執行緒備援強制斷電
+- 電磁鐵放開互鎖：充電中、仍有電流、或銅片仍帶電 (車上接觸器未斷開) 時拒絕放開並警告；
+  CAN 無回應 (無法確認是否帶電) 時也拒絕。電磁鐵放開期間不允許開始充電
 
 接線：
   RPi GPIO22 (Pin15) → Relay IN
@@ -93,9 +95,17 @@ BAT_V_MAX = 58.8             # 14S × 4.2 V 滿充
 CURVE_CV_TOL = 0.05          # CV 設定允許超出 BAT_V_MAX 的量 (V)
 
 # 電磁鐵 (PLA 座約 55–60 °C 軟化，通電時間必須受限)
-MAG_RELEASE_S  = 2.0    # 預設放開時間 (秒)
-MAG_MAX_S      = 3.0    # 單次通電上限 (秒)；API 超過即拒絕，監控執行緒也會強制斷電
-MAG_COOLDOWN_S = 10.0   # 兩次放開之間最少間隔 (秒)
+# 實測 5 秒通電不會明顯發燙
+MAG_RELEASE_S  = 5.0    # 預設放開時間 (秒)
+MAG_MAX_S      = 5.0    # 單次通電上限 (秒)；API 超過即拒絕
+MAG_WATCHDOG_S = MAG_MAX_S + 0.5   # 監控執行緒備援強制斷電 (多留 0.5 秒避免和正常結束搶)
+MAG_COOLDOWN_S = 5.0    # 兩次放開之間最少間隔 (秒)
+
+# 放開電磁鐵互鎖：充電頭必須確實不帶電才可放開
+# 接觸器 OFF + 充電器 OFF 時銅片電壓應約 0 V；門檻遠低於電池最低 42 V
+# 【待確認】實測接觸器斷開後讀值多少、充電器輸出電容放電要多久
+SAFE_RELEASE_V_MAX = 10.0   # 電壓高於此值 → 視為帶電，不可放開 (V)
+SAFE_RELEASE_I_MAX = 0.5    # 電流高於此值 → 視為仍在充電，不可放開 (A)
 
 # ======================== 狀態 ========================
 class State:
@@ -262,37 +272,39 @@ def charger_on():
     """開啟充電器。回傳 (成功?, 訊息)"""
     with ctl_lock:
         if s.charging:
-            return False, "已在充電中"
+            return False, "Already charging"
+        if s.mag_on:
+            return _refuse("Cannot start: magnet is released, charging head not held")
         if bus is None:
-            return _refuse("無法啟動：CAN 未連線，無法監控")
+            return _refuse("Cannot start: CAN not connected, cannot monitor")
 
         # 取得新鮮資料 (不能用舊值判斷)
         if not request_fresh(['FAULT_STATUS', 'READ_VOUT', 'CURVE_CV', 'CURVE_CC']):
-            return _refuse("無法啟動：充電器 CAN 無回應")
+            return _refuse("Cannot start: charger not responding on CAN")
 
         fault_bits = s.fault & ~F_OP_OFF   # 忽略 OP_OFF (還沒開當然是 OFF)
         if fault_bits:
-            return _refuse(f"無法啟動：充電器有故障 {', '.join(fmt_fault(fault_bits))}")
+            return _refuse(f"Cannot start: charger fault {', '.join(fmt_fault(fault_bits))}")
 
         # 充電曲線 CV 不可高於電池滿充電壓
         if s.curve_cv is not None and s.curve_cv > BAT_V_MAX + CURVE_CV_TOL:
-            return _refuse(f"無法啟動：充電器 CV 設定 {s.curve_cv:.2f} V 高於電池上限 {BAT_V_MAX} V")
+            return _refuse(f"Cannot start: charger CV setting {s.curve_cv:.2f} V is above battery max {BAT_V_MAX} V")
 
         # 流程第 5 步：確認電池電壓 (接觸器 ON 之後銅片才帶電池電壓)
         if REQUIRE_BAT_VOLTAGE and not (BAT_V_MIN <= s.voltage <= BAT_V_MAX):
-            return _refuse(f"無法啟動：電池電壓 {s.voltage:.2f} V 不在 {BAT_V_MIN}–{BAT_V_MAX} V "
-                           f"(未對接或接觸器未開？)")
+            return _refuse(f"Cannot start: battery voltage {s.voltage:.2f} V not within {BAT_V_MIN}–{BAT_V_MAX} V "
+                           f"(head not docked or contactor OFF?)")
 
         read_gpio(); read_gpio()
         if s.bat_ok:
-            return _refuse("無法啟動：電池充滿信號為高")
+            return _refuse("Cannot start: battery-full signal is high")
 
         lgpio.gpio_write(chip, PIN_RELAY, 1)
         s.charging = True
         s.t_start = time.time()
-        msg = f"充電器已開啟 (電池 {s.voltage:.2f} V"
+        msg = f"Charger ON (battery {s.voltage:.2f} V"
         if s.curve_cv is not None:
-            msg += f"，CV 設定 {s.curve_cv:.2f} V"
+            msg += f", CV setting {s.curve_cv:.2f} V"
         msg += ")"
         s.last_event = msg
         return True, msg
@@ -305,15 +317,15 @@ def charger_off():
             s.t_total += int(time.time() - s.t_start)
         s.charging = False
         s.t_start = None
-        s.last_event = "充電器已關閉"
-        return True, "充電器已關閉"
+        s.last_event = "Charger OFF"
+        return True, "Charger OFF"
 
 def emergency_off(reason):
     with ctl_lock:
         s.faults += 1
-        print(f"\n  ⚠ 緊急斷電: {reason} (#{s.faults})")
+        print(f"\n  ⚠ Emergency OFF: {reason} (#{s.faults})")
         charger_off()
-        s.last_event = f"⚠ 緊急斷電: {reason}"   # charger_off 會覆蓋,重設回來
+        s.last_event = f"⚠ Emergency OFF: {reason}"   # charger_off 會覆蓋,重設回來
 
 # ======================== 電磁鐵 ========================
 def magnet_off():
@@ -326,36 +338,58 @@ def magnet_off():
             s.mag_t_off = time.monotonic()
         s.mag_on = False
 
+def magnet_live_reason():
+    """依目前資料判斷充電頭是否可能帶電。回傳原因字串 (帶電/無法確認)，安全則回傳 None"""
+    if s.charging:
+        return "charging, stop charging first"
+    if not can_fresh():
+        return "CAN not responding, cannot confirm the head is dead"
+    if s.current > SAFE_RELEASE_I_MAX:
+        return f"current still {s.current:.2f} A, wait until it drops to 0"
+    if s.voltage > SAFE_RELEASE_V_MAX:
+        return f"charging head is live ({s.voltage:.1f} V), turn the contactor OFF first"
+    return None
+
 def magnet_release(seconds=MAG_RELEASE_S):
     """通電放開電磁鐵 seconds 秒後自動斷電 (阻塞到結束)。回傳 (成功?, 訊息)"""
     if not (0.1 <= seconds <= MAG_MAX_S):
-        return False, f"放開時間須在 0.1–{MAG_MAX_S:.0f} 秒之間"
+        return False, f"Release time must be 0.1–{MAG_MAX_S:.0f} s"
     if not mag_lock.acquire(blocking=False):
-        return False, "電磁鐵正在放開中"
+        return False, "Magnet is already releasing"
     try:
         wait = MAG_COOLDOWN_S - (time.monotonic() - s.mag_t_off)
         if s.mag_t_off > 0 and wait > 0:
-            return False, f"電磁鐵冷卻中，請 {wait:.1f} 秒後再試"
-        s.mag_on = True
-        s.mag_t_on = time.monotonic()
-        s.mag_count += 1
-        lgpio.gpio_write(chip, PIN_MAG_EN, 1)
-        lgpio.gpio_write(chip, PIN_MAG_DIR, 1)
-        s.last_event = f"電磁鐵放開中 ({seconds:.1f} 秒)"
+            return False, f"Magnet cooling down, try again in {wait:.1f} s"
+        # 互鎖：持有 ctl_lock，檢查到通電之間不會有人開啟充電
+        with ctl_lock:
+            # 用「新鮮」的電壓/電流判斷，不用舊資料
+            if bus is None or not request_fresh(['READ_VOUT', 'READ_IOUT']):
+                reason = "CAN not responding, cannot confirm the head is dead"
+            else:
+                reason = magnet_live_reason()
+            if reason:
+                print(f"\n  ⚠ Magnet release refused: {reason}")
+                return False, f"⚠ Cannot release magnet: {reason}"
+            s.mag_on = True
+            s.mag_t_on = time.monotonic()
+            s.mag_count += 1
+            lgpio.gpio_write(chip, PIN_MAG_EN, 1)
+            lgpio.gpio_write(chip, PIN_MAG_DIR, 1)
+        s.last_event = f"Releasing magnet ({seconds:.1f} s)"
         time.sleep(seconds)
-        return True, f"電磁鐵已放開 {seconds:.1f} 秒，已恢復吸住"
+        return True, f"Magnet released for {seconds:.1f} s, now holding again"
     finally:
         magnet_off()
-        if s.last_event.startswith("電磁鐵放開中"):
-            s.last_event = "電磁鐵已恢復吸住"
+        if s.last_event.startswith("Releasing magnet"):
+            s.last_event = "Magnet holding again"
         mag_lock.release()
 
 def magnet_watchdog():
     """備援：通電超過上限就強制斷電 (正常情況 magnet_release 會自己關)"""
-    if s.mag_on and time.monotonic() - s.mag_t_on > MAG_MAX_S:
+    if s.mag_on and time.monotonic() - s.mag_t_on > MAG_WATCHDOG_S:
         magnet_off()
         s.faults += 1
-        s.last_event = f"⚠ 電磁鐵通電超過 {MAG_MAX_S:.0f} 秒，已強制斷電"
+        s.last_event = f"⚠ Magnet powered over {MAG_MAX_S:.0f} s, forced OFF"
         print(f"\n  {s.last_event}")
 
 def safety_check():
@@ -366,27 +400,27 @@ def safety_check():
 
         # CAN 斷線 → 無法監控，立即斷電
         if not can_fresh():
-            emergency_off(f"CAN 通訊中斷超過 {CAN_TIMEOUT:.0f} 秒"); return
+            emergency_off(f"CAN lost for over {CAN_TIMEOUT:.0f} s"); return
 
         # GPIO: 電池充滿信號
         if s.bat_ok:
-            print("  ● 電池充滿,自動停止充電")
+            print("  ● Battery full, charging stopped automatically")
             charger_off()
-            s.last_event = "電池充滿,自動停止充電"
+            s.last_event = "Battery full, charging stopped automatically"
             return
 
         # CAN 故障旗標
-        if s.fault & F_OTP:     emergency_off("OTP 過溫"); return
-        if s.fault & F_HI_TEMP: emergency_off("HI_TEMP 內部高溫"); return
-        if s.fault & F_OVP:     emergency_off("OVP 過壓"); return
-        if s.fault & F_OLP:     emergency_off("OLP 過載"); return
-        if s.fault & F_SHORT:   emergency_off("SHORT 短路"); return
-        if s.fault & F_AC_FAIL: emergency_off("AC_FAIL 交流異常"); return
+        if s.fault & F_OTP:     emergency_off("OTP over-temperature"); return
+        if s.fault & F_HI_TEMP: emergency_off("HI_TEMP internal high temperature"); return
+        if s.fault & F_OVP:     emergency_off("OVP over-voltage"); return
+        if s.fault & F_OLP:     emergency_off("OLP overload"); return
+        if s.fault & F_SHORT:   emergency_off("SHORT short circuit"); return
+        if s.fault & F_AC_FAIL: emergency_off("AC_FAIL AC input failure"); return
 
         # 軟體閾值保護
-        if s.voltage > VOLTAGE_MAX: emergency_off(f"電壓過高 {s.voltage:.2f}V"); return
-        if s.current > CURRENT_MAX: emergency_off(f"電流過大 {s.current:.2f}A"); return
-        if s.temp > TEMP_MAX:       emergency_off(f"溫度過高 {s.temp:.1f}°C"); return
+        if s.voltage > VOLTAGE_MAX: emergency_off(f"Voltage too high {s.voltage:.2f} V"); return
+        if s.current > CURRENT_MAX: emergency_off(f"Current too high {s.current:.2f} A"); return
+        if s.temp > TEMP_MAX:       emergency_off(f"Temperature too high {s.temp:.1f} °C"); return
 
 # ======================== 格式化 ========================
 def fmt_fault(f):
@@ -433,6 +467,7 @@ def snapshot():
             "last_event": s.last_event,
             "magnet_on": s.mag_on,
             "magnet_count": s.mag_count,
+            "magnet_lock": None if s.mag_on else magnet_live_reason(),   # 不可放開的原因 (None=可放開)
             "magnet_cooldown": round(max(0.0, MAG_COOLDOWN_S - (time.monotonic() - s.mag_t_off))
                                      if s.mag_t_off > 0 and not s.mag_on else 0.0, 1),
             "ts": int(time.time()),
@@ -457,7 +492,7 @@ def api_charge_off():
 
 @app.post("/magnet/release")
 def api_magnet_release(ms: int = int(MAG_RELEASE_S * 1000)):
-    """通電放開電磁鐵 ms 毫秒 (預設 2000，上限 3000)，結束後才回應"""
+    """通電放開電磁鐵 ms 毫秒 (預設 5000，上限 5000)，結束後才回應。帶電時拒絕"""
     ok, msg = magnet_release(ms / 1000.0)
     if not ok:
         s.last_event = msg
@@ -467,7 +502,7 @@ def api_magnet_release(ms: int = int(MAG_RELEASE_S * 1000)):
 def api_magnet_off():
     """強制斷電 (= 吸住)"""
     magnet_off()
-    s.last_event = "電磁鐵已強制斷電 (吸住)"
+    s.last_event = "Magnet forced OFF (holding)"
     return {"ok": True, "message": s.last_event, "state": snapshot()}
 
 @app.websocket("/ws")
@@ -488,11 +523,11 @@ def dashboard():
 
 # ======================== 網頁 ========================
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NPB-1700 充電站</title>
+<title>NPB-1700 Charging Station</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -537,33 +572,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <h1>NPB-1700 充電站</h1>
-  <div class="sub">遠端監控 · <span id="conn" class="conn off">連線中…</span>
+  <h1>NPB-1700 Charging Station</h1>
+  <div class="sub">Remote monitor · <span id="conn" class="conn off">Connecting…</span>
       · CAN <span id="can" class="conn off">--</span>
-      · 繼電器 <span id="relay" class="relay-badge off">OFF</span></div>
+      · Relay <span id="relay" class="relay-badge off">OFF</span></div>
 
   <div class="controls">
-    <button id="btnOn"  class="btn on"  onclick="charge('on')">開始充電</button>
-    <button id="btnOff" class="btn off" onclick="charge('off')">停止充電</button>
+    <button id="btnOn"  class="btn on"  onclick="charge('on')">Start charging</button>
+    <button id="btnOff" class="btn off" onclick="charge('off')">Stop charging</button>
   </div>
 
   <div class="controls">
-    <button id="btnMag" class="btn mag" onclick="magnet()">放開電磁鐵 (2 秒)</button>
+    <button id="btnMag" class="btn mag" onclick="magnet()">Release magnet (5 s)</button>
   </div>
 
   <div class="event" id="event">—</div>
 
   <div class="grid">
-    <div class="card"><div class="label">電壓</div><div class="value"><span id="v">--</span> <span class="unit">V</span></div></div>
-    <div class="card"><div class="label">電流</div><div class="value"><span id="i">--</span> <span class="unit">A</span></div></div>
-    <div class="card"><div class="label">溫度</div><div class="value"><span id="t">--</span> <span class="unit">°C</span></div></div>
-    <div class="card"><div class="label">功率</div><div class="value"><span id="p">--</span> <span class="unit">W</span></div></div>
+    <div class="card"><div class="label">Voltage</div><div class="value"><span id="v">--</span> <span class="unit">V</span></div></div>
+    <div class="card"><div class="label">Current</div><div class="value"><span id="i">--</span> <span class="unit">A</span></div></div>
+    <div class="card"><div class="label">Charger temp</div><div class="value"><span id="t">--</span> <span class="unit">°C</span></div></div>
+    <div class="card"><div class="label">Power</div><div class="value"><span id="p">--</span> <span class="unit">W</span></div></div>
   </div>
 
   <div class="status-row" id="pills"></div>
-  <div class="foot">充電時間 <span id="elapsed">00:00:00</span> · 異常 <span id="faults">0</span> 次
-      · 最後更新 <span id="upd">--</span> · CAN 收包 <span id="rx">0</span><br>
-      充電器曲線設定：CV <span id="cv">--</span> V · CC <span id="cc">--</span> A</div>
+  <div class="foot">Charge time <span id="elapsed">00:00:00</span> · Faults <span id="faults">0</span>
+      · Last update <span id="upd">--</span> · CAN packets <span id="rx">0</span><br>
+      Charger curve setting: CV <span id="cv">--</span> V · CC <span id="cc">--</span> A</div>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -582,19 +617,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const d = await r.json();
       showEvent(d.message, !d.ok);
     } catch (e) {
-      showEvent("指令傳送失敗", true);
+      showEvent("Command failed to send", true);
     }
   }
 
   async function magnet() {
     $("btnMag").disabled = true;
-    showEvent("電磁鐵放開中…", false);
+    showEvent("Releasing magnet…", false);
     try {
-      const r = await fetch("/magnet/release?ms=2000", { method: "POST" });
+      const r = await fetch("/magnet/release?ms=5000", { method: "POST" });
       const d = await r.json();
       showEvent(d.message, !d.ok);
     } catch (e) {
-      showEvent("指令傳送失敗", true);
+      showEvent("Command failed to send", true);
     }
   }
 
@@ -617,14 +652,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     $("cc").textContent = d.curve_cc === null ? "--" : d.curve_cc.toFixed(2);
 
     const can = $("can");
-    can.textContent = d.can_ok ? "正常" : "無回應";
+    can.textContent = d.can_ok ? "OK" : "No response";
     can.className = "conn " + (d.can_ok ? "ok" : "off");
 
     const mag = $("btnMag");
-    mag.disabled = d.magnet_on || d.magnet_cooldown > 0;
-    mag.textContent = d.magnet_on ? "電磁鐵放開中…"
-                    : d.magnet_cooldown > 0 ? "冷卻中 " + d.magnet_cooldown.toFixed(0) + " 秒"
-                    : "放開電磁鐵 (2 秒)";
+    mag.disabled = d.magnet_on || d.magnet_cooldown > 0 || !!d.magnet_lock;
+    mag.title = d.magnet_lock || "";
+    mag.textContent = d.magnet_on ? "Releasing magnet…"
+                    : d.magnet_lock ? "⚠ Cannot release: " + d.magnet_lock
+                    : d.magnet_cooldown > 0 ? "Cooling down " + d.magnet_cooldown.toFixed(0) + " s"
+                    : "Release magnet (5 s)";
 
     const relay = $("relay");
     relay.textContent = d.charging ? "ON" : "OFF";
@@ -633,7 +670,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     $("btnOff").disabled = !d.charging;
 
     if (d.last_event) {
-      showEvent(d.last_event, d.last_event.indexOf("⚠") >= 0 || d.last_event.indexOf("無法") >= 0);
+      showEvent(d.last_event, d.last_event.indexOf("⚠") >= 0 || d.last_event.indexOf("Cannot") >= 0);
     }
 
     const pills = [];
@@ -647,16 +684,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (d.has_fault) {
       d.fault.forEach(f => pills.push('<span class="pill fault">' + f + '</span>'));
     }
-    pills.push('<span class="pill">電池 ' + (d.bat_ok ? "已滿" : "未滿") + '</span>');
+    pills.push('<span class="pill">Battery ' + (d.bat_ok ? "full" : "not full") + '</span>');
     $("pills").innerHTML = pills.join("");
   }
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(proto + "://" + location.host + "/ws");
-    ws.onopen = () => { $("conn").textContent = "已連線"; $("conn").className = "conn ok"; };
+    ws.onopen = () => { $("conn").textContent = "Connected"; $("conn").className = "conn ok"; };
     ws.onclose = () => {
-      $("conn").textContent = "斷線,重連中…"; $("conn").className = "conn off";
+      $("conn").textContent = "Disconnected, reconnecting…"; $("conn").className = "conn off";
       setTimeout(connect, 2000);
     };
     ws.onmessage = (e) => render(JSON.parse(e.data));

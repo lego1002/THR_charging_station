@@ -40,14 +40,14 @@ After booting, the station joins the lab Wi-Fi **`RMML_5G`** automatically.
 
 | On screen | Meaning |
 |---|---|
-| 連線 (Connection) green | Your device is connected to the station |
+| Connected (green) | Your device is connected to the station |
 | CAN green | The station is reading data from the charger. **If it is red, do not charge** |
-| 繼電器 (Relay) ON/OFF | Whether the station has *told* the charger to turn on. **ON does not mean it is actually charging**; check the current below |
-| 電壓 (Voltage) | Voltage at the charger output (V) |
-| 電流 (Current) | Current flowing into the battery (A). **Only above 0 means it is really charging** |
-| 溫度 (Temperature) | Temperature **inside the charger**, **not** the copper contacts |
-| 開始充電 / 停止充電 | Start / stop the charger |
-| 放開電磁鐵 (2 秒) | Release the electromagnet for 2 seconds, so the charging head can be pulled out |
+| Relay ON/OFF | Whether the station has *told* the charger to turn on. **ON does not mean it is actually charging**; check the current below |
+| Voltage | Voltage at the charger output (V) |
+| Current | Current flowing into the battery (A). **Only above 0 means it is really charging** |
+| Charger temp | Temperature **inside the charger**, **not** the copper contacts |
+| Start charging / Stop charging | Start / stop the charger |
+| Release magnet (5 s) | Release the electromagnet for 5 seconds, so the charging head can be pulled out. After each release it must rest 5 seconds. **The button is locked (shows ⚠) while charging, while current is still flowing, or while the copper contacts are live (voltage above 10 V, i.e. the contactor is still ON)**; it is also locked if CAN is not responding, because the station cannot confirm the head is dead |
 
 Built-in protection: the station **cuts power automatically** if voltage exceeds 59.5 V, current exceeds 26 A, the charger's own temperature exceeds 85 °C, or charger data can no longer be read.
 
@@ -64,17 +64,17 @@ Rule: **connect first, then power on; power off first, then disconnect.** Never 
 5. The **voltage** on the web page should be between **42 and 58.8 V** (battery voltage).
    - About 0 V: the head is not seated properly, or the contactor is not on.
    - On first use, or after any rewiring, **use a multimeter on the charger output terminals, V+ to V−, and confirm the reading is positive**. If it is negative, the polarity is reversed: **turn the contactor OFF immediately and do not press Start.**
-6. Press "**開始充電**" (Start charging).
+6. Press "**Start charging**".
 7. Within a few seconds the **current** should rise (to about 25 A if the battery is not nearly full).
-   - If Relay shows ON but current stays at 0 and the charger status reads `OP_OFF`, the **emergency stop is usually pressed**. Press "停止充電" (Stop) first, release the emergency stop, then press "開始充電" again.
+   - If Relay shows ON but current stays at 0 and the charger status reads `OP_OFF`, the **emergency stop is usually pressed**. Press "Stop charging" first, release the emergency stop, then press "Start charging" again.
 8. During the first few minutes, check by hand or with an infrared thermometer whether the **copper contacts and wire terminals** are getting hot.
 
 ### Stop charging
 
-1. Press "**停止充電**" (Stop charging).
+1. Press "**Stop charging**".
 2. Wait until the **current drops to about 0 A**.
 3. Turn the **contactor OFF**.
-4. Press "放開電磁鐵" (Release magnet) and pull out the charging head.
+4. Wait until the voltage on the web page drops to about 0 V, then press "Release magnet" and pull out the charging head. If the page warns ⚠ that the head is live, **do not pull it out by force**: check that charging has stopped and the contactor is OFF.
 
 ## 5. Emergency
 
@@ -95,7 +95,7 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 | Problem | What to do |
 |---|---|
 | The page will not open | ① Check that your phone is on `RMML_5G`. Tip (outside the lab): set your phone hotspot's name to `RMML_5G` with exactly the same password as the lab Wi-Fi, and the Raspberry Pi will join it. ② The station needs 1–2 minutes after power-on. ③ Some Android phones do not support `.local` addresses; use a laptop instead, or ask the person in charge (Lego) to control it remotely |
-| After pressing Start, the page says "無法啟動：電池電壓…不在…" (battery voltage out of range) | The charging head is not seated, or the contactor is not on |
+| After pressing Start, the page says "Cannot start: battery voltage … not within …" | The charging head is not seated, or the contactor is not on |
 | "無法啟動：充電器 CAN 無回應" (CAN no response) | The charger's AC is not plugged in, or the CAN cable is loose. Tell the person in charge |
 | "無法啟動：電池充滿信號為高" (battery-full signal high) | The battery is already full; no need to charge |
 | Current is small and soon drops to 0 | The battery is nearly full. This is normal |
@@ -111,7 +111,7 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 | `NPB1700_usermanual_CAN.pdf` | Mean Well CAN manual |
 | `systemd/` | Auto-start services; see `systemd/README.md` to install |
 
-- API: `GET /status`, `POST /charge/on`, `POST /charge/off`, `POST /magnet/release?ms=2000`, `POST /magnet/off`, WebSocket `/ws`
+- API: `GET /status`, `POST /charge/on`, `POST /charge/off`, `POST /magnet/release?ms=5000` (max 5000; refused while live), `POST /magnet/off`, WebSocket `/ws`
 - Hardware: Raspberry Pi (Ubuntu 22.04) + MCP2515 CAN (250 kbps, 120 Ω termination); GPIO22 (physical pin 15) → relay → NPB pins 7/8 (in series with a normally-closed emergency stop)
 - With the default DIP settings the NPB-1700 **ignores CAN writes**, so CAN is used for monitoring only; on/off is done by the hardware relay.
 - Logs: `journalctl -u npb1700 -f`; restart after editing code: `sudo systemctl restart npb1700`
@@ -154,14 +154,14 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 
 | 畫面上寫的 | 意思 |
 |---|---|
-| 連線 綠色 | 你的手機和充電站連線正常 |
+| Connected（綠色） | 你的手機和充電站連線正常 |
 | CAN 綠色 | 充電站有讀到充電器的資料。**如果是紅色，就不要充電** |
-| 繼電器 ON／OFF | 充電站「有沒有下指令」叫充電器開機。**ON 不代表真的在充電**，要看下面的電流 |
-| 電壓 | 充電器輸出端的電壓（V） |
-| 電流 | 正在流進電池的電流（A）。**大於 0 才是真的在充電** |
-| 溫度 | **充電器內部**的溫度，**不是**銅片的溫度 |
-| 開始充電／停止充電 | 打開／關閉充電器 |
-| 放開電磁鐵 (2 秒) | 讓電磁鐵鬆開充電頭 2 秒，用來拔開充電頭 |
+| Relay ON／OFF | 充電站「有沒有下指令」叫充電器開機。**ON 不代表真的在充電**，要看下面的電流 |
+| Voltage（電壓） | 充電器輸出端的電壓（V） |
+| Current（電流） | 正在流進電池的電流（A）。**大於 0 才是真的在充電** |
+| Charger temp（溫度） | **充電器內部**的溫度，**不是**銅片的溫度 |
+| Start charging／Stop charging | 打開／關閉充電器 |
+| Release magnet (5 s) | 讓電磁鐵鬆開充電頭 5 秒，用來拔開充電頭；每次放開後要休息 5 秒。**充電中、還有電流、或銅片還帶電（電壓高於 10 V，表示接觸器還沒關）時按鈕會鎖住並顯示 ⚠**；CAN 無回應時也會鎖住，因為無法確認充電頭有沒有帶電 |
 
 充電站有自動保護：電壓超過 59.5 V、電流超過 26 A、充電器本身溫度超過 85 °C，或讀不到充電器資料時，會**自動斷電**。
 
@@ -171,24 +171,24 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 
 ### 開始充電
 
-1. 確認**接觸器的開關是 OFF**（接觸器外掛在充電站底座；為了 Demo 另外拉出一組緊急開關，**按下去＝OFF**），網頁上繼電器顯示 **OFF**。
+1. 確認**接觸器的開關是 OFF**（接觸器外掛在充電站底座；為了 Demo 另外拉出一組緊急開關，**按下去＝OFF**），網頁上 Relay 顯示 **OFF**。
 2. 確認**紅色急停按鈕是放開的**（彈起來的狀態）。
 3. 把充電頭插進充電座，讓電磁鐵吸住。**先確認正極標記有對齊**（反插會讓正負極對調）。
 4. 打開**接觸器**。
 5. 看網頁上的**電壓**，應該要在 **42～58.8 V** 之間（電池電壓）。
    - 如果是 0 V 左右：表示沒接好，或接觸器沒有打開。
-   - 第一次使用、或有重新接過線，要**用三用電表量充電器的輸出端子 V+ 對 V−，確認是正電壓**。如果是負的，就表示極性接反了，**馬上關掉接觸器，不要按開始充電。**
-6. 按「**開始充電**」。
+   - 第一次使用、或有重新接過線，要**用三用電表量充電器的輸出端子 V+ 對 V−，確認是正電壓**。如果是負的，就表示極性接反了，**馬上關掉接觸器，不要按 Start charging。**
+6. 按「**Start charging**」（開始充電）。
 7. 幾秒內**電流**應該要開始上升（電池沒滿的話，會到 25 A 左右）。
-   - 如果繼電器顯示 ON，但電流一直是 0、充電器狀態寫 `OP_OFF`，通常是**急停按鈕被壓下去了**。請先按「停止充電」，把急停放開，再按一次「開始充電」。
+   - 如果 Relay 顯示 ON，但電流一直是 0、充電器狀態寫 `OP_OFF`，通常是**急停按鈕被壓下去了**。請先按「Stop charging」，把急停放開，再按一次「Start charging」。
 8. 剛開始充電的前幾分鐘，用手或紅外線溫度計摸摸看**銅片和接線端子**有沒有發燙。
 
 ### 結束充電
 
-1. 按「**停止充電**」。
+1. 按「**Stop charging**」（停止充電）。
 2. 等**電流降到 0 A 左右**。
 3. 關掉**接觸器**。
-4. 按「放開電磁鐵」，拔出充電頭。
+4. 等網頁上的電壓降到 0 V 左右，再按「Release magnet」（放開電磁鐵），拔出充電頭。如果網頁出現 ⚠ 警告說充電頭帶電，**不要硬拔**，先確認已停止充電、接觸器已關。
 
 ## 5. 緊急情況
 
@@ -209,11 +209,11 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 | 狀況 | 怎麼辦 |
 |---|---|
 | 網頁打不開 | ① 確認手機連的是 `RMML_5G`。小技巧（在實驗室外）：把手機熱點的名稱設成 `RMML_5G`，密碼跟實驗室的一模一樣，樹莓派就會自動連上。② 充電站開機要等 1～2 分鐘。③ 部分 Android 手機不支援 `.local` 網址，請改用筆電，或請負責人（樂高）遠端連線控制 |
-| 按了開始充電，網頁說「無法啟動：電池電壓不在範圍內」 | 充電頭沒有插好，或接觸器沒有打開 |
+| 按了 Start charging，網頁說「Cannot start: battery voltage … not within …」（電池電壓不在範圍內） | 充電頭沒有插好，或接觸器沒有打開 |
 | 「無法啟動：CAN 無回應」 | 充電器沒有插 AC 電源，或 CAN 線鬆了，請通知負責人 |
 | 「無法啟動：電池充滿信號為高」 | 電池已經滿了，不需要充電 |
 | 電流很小、很快就降到 0 | 電池快滿了，這是正常的 |
-| 繼電器 ON，但電流一直是 0 | 急停按鈕被壓下去了（見第 4 節第 7 步） |
+| Relay ON，但電流一直是 0 | 急停按鈕被壓下去了（見第 4 節第 7 步） |
 
 ## 給維護者
 
@@ -225,7 +225,7 @@ If there is **smoke, a burning smell, sparks, or the copper is too hot to touch*
 | `NPB1700_usermanual_CAN.pdf` | 明緯原廠 CAN 手冊 |
 | `systemd/` | 開機自動啟動的服務設定，安裝方式見 `systemd/README.md` |
 
-- API：`GET /status`、`POST /charge/on`、`POST /charge/off`、`POST /magnet/release?ms=2000`、`POST /magnet/off`、WebSocket `/ws`
+- API：`GET /status`、`POST /charge/on`、`POST /charge/off`、`POST /magnet/release?ms=5000`（上限 5000；帶電時拒絕）、`POST /magnet/off`、WebSocket `/ws`
 - 硬體：Raspberry Pi（Ubuntu 22.04）+ MCP2515 CAN（250 kbps，120 Ω 終端）；GPIO22（實體 Pin 15）→ 繼電器 → NPB Pin 7/8（串接常閉急停）
 - NPB-1700 在預設 DIP 設定下會**忽略 CAN 寫入**，所以 CAN 只用來監控，開關機靠硬體繼電器。
 - 看 log：`journalctl -u npb1700 -f`；改完程式後要重啟：`sudo systemctl restart npb1700`
